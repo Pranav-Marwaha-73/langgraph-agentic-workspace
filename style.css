@@ -1,0 +1,63 @@
+
+/* Optional: Add a slight dark overlay so your text is easier to read */
+/* Custom Background Image with built-in overlay */
+.stApp {
+    /* The linear-gradient acts as the overlay, sitting perfectly on top of the url() */
+    background: linear-gradient(rgba(241, 132, 132, 0.66), rgba(206, 252, 2, 0.1)), 
+                url("https://images.pexels.com/photos/12486830/pexels-photo-12486830.jpeg?_gl=1*bplksa*_ga*MTUwMzUzNjk4Ny4xNzczODY5NDE3*_ga_8JE65Q40S6*czE3NzM5Mjg2MzIkbzIkZzEkdDE3NzM5MzA0MDEkajU5JGwwJGgw");
+    background-size: cover;
+    background-position: center;
+    background-attachment: fixed;
+}
+
+/* Fix Chat Bubbles: Give both User and AI a frosted glass background */
+[data-testid="stChatMessage"] {
+    background-color: rgba(255, 255, 255, 0.65) !important; /* Semi-transparent white */
+    border-radius: 15px;
+    padding: 15px 20px;
+    margin-bottom: 10px;
+    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.05);
+    backdrop-filter: blur(5px); /* Creates the Apple-style frosted glass effect */
+}
+
+/* Optional: Make the avatar icons align nicely with the new padding */
+[data-testid="stChatMessage"] > div:first-child {
+    margin-top: 5px;
+}
+
+/* Custom Frosted Glass Card for the Welcome Text */
+.intro-card {
+    background-color: rgba(255, 255, 255, 0.65);
+    padding: 1rem;
+    border-radius: 15px;
+    backdrop-filter: blur(5px);
+    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.05);
+    margin-bottom: 2rem;
+    border: 1px solid rgba(255, 255, 255, 0.4);
+}
+/* 1. Frosted Glass Sidebar (replaces the solid white) */
+[data-testid="stSidebar"] {
+    background-color: rgba(255, 255, 255, 0.25) !important;
+    backdrop-filter: blur(10px) !important;
+    border-right: 1px solid rgba(255, 255, 255, 0.3) !important;
+}
+
+/* 2. Kill the solid white top header */
+[data-testid="stHeader"] {
+    background-color: transparent !important;
+}
+
+/* 3. Kill the solid white block behind the chat input at the bottom */
+[data-testid="stBottom"] {
+    background-color: transparent !important;
+}
+[data-testid="stBottom"] > div {
+    background-color: transparent !important;
+}
+
+/* 4. Make the chat input box itself slightly frosted */
+[data-testid="stChatInput"] {
+    background-color: rgba(255, 255, 255, 0.7) !important;
+    backdrop-filter: blur(5px);
+    border-radius: 10px;
+}

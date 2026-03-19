@@ -1,0 +1,16 @@
+# 🚨 CRITICAL: Never push secrets to GitHub
+.env
+
+# 🗑️ Virtual Environments (Render will build its own)
+myvenv/
+venv/
+env/
+
+# 🐍 Python Cache (Useless compiled files)
+__pycache__/
+*.pyc
+*.pyo
+
+# 💻 OS specific garbage files
+.DS_Store
+Thumbs.db
