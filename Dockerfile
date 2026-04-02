@@ -29,4 +29,4 @@ ENV STREAMLIT_SERVER_ADDRESS=0.0.0.0
 ENV STREAMLIT_BROWSER_GATHER_USAGE_STATS=false
 
 # 9. The Ignition Switch: The exact command to boot your app
-CMD ["streamlit", "run", "front2.py"]
+CMD ["streamlit", "run", "ReAct.py"]

@@ -2,6 +2,7 @@ import os
 import tempfile
 from typing import TypedDict, Annotated, Optional, Dict, Any
 import contextvars
+from Crag import crag_app
 import streamlit as st
 from psycopg_pool import AsyncConnectionPool
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
@@ -22,13 +23,13 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_mcp_adapters.client import MultiServerMCPClient
 
 from dotenv import load_dotenv
-
+import yfinance as yf
 import requests
 import asyncio
 import threading
 # 🛡️ SECURE RAM VARIABLES (Invisible to Supabase)
 openai_key_var = contextvars.ContextVar('openai_key', default="")
-stock_key_var = contextvars.ContextVar('stock_key', default="")
+tavily_key_var = contextvars.ContextVar('tavily_key', default="")
 load_dotenv()
 
 # ==========================================
@@ -140,41 +141,126 @@ def calculator(first_num: float, second_num: float, operation: str) -> dict:
         return {"error": str(e)}
 
 @tool
-def get_stock_price(symbol: str) -> dict: # <-- Removed config from arguments!
+def get_stock_price(symbol: str) -> dict:
     """Fetch latest stock price for a given symbol (e.g. 'AAPL', 'TSLA')."""
-    api_key = stock_key_var.get() # <-- Read securely from RAM
-    
-    if not api_key:
-        return {"error": "No Alpha Vantage API key provided in the sidebar."}
+    try:
+        ticker = yf.Ticker(symbol)
+        # Use .history() instead of fast_info, it is much more reliable!
+        hist = ticker.history(period="1d")
         
-    url = f"https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol={symbol}&apikey={api_key}"
-    r = requests.get(url)
-    return r.json()
+        if hist.empty:
+            raise ValueError("Yahoo returned empty data.")
+            
+        price = hist['Close'].iloc[-1] # Grabs the most recent closing price
+        return {"price": round(price, 2), "source": "Yahoo Finance"}
+        
+    except Exception as e:
+        return {"error": f"SYSTEM ERROR: Could not fetch price for {symbol}. Do NOT search the web. Ask the user to verify the ticker symbol."}
+    
+@tool
+def convert_currency(amount: float, from_currency: str, to_currency: str) -> str:
+    """Converts currency using real-time exchange rates (e.g., amount=100, from_currency='USD', to_currency='INR')."""
+    try:
+        from_currency = from_currency.upper()
+        to_currency = to_currency.upper()
+        
+        if from_currency == to_currency:
+            return f"{amount} {from_currency} is {amount} {to_currency}"
+            
+        # UPGRADE: Faster API + a strict 5-second timeout limit
+        url = f"https://open.er-api.com/v6/latest/{from_currency}"
+        r = requests.get(url, timeout=5) 
+        
+        if r.status_code != 200:
+            return f"Error: Could not fetch rates for {from_currency}."
+            
+        data = r.json()
+        
+        if to_currency not in data['rates']:
+            return f"Error: Currency code '{to_currency}' not found."
+            
+        rate = data['rates'][to_currency]
+        converted = round(amount * rate, 2)
+        
+        return f"{amount} {from_currency} = {converted} {to_currency} (Source: ExchangeRate-API)"
+        
+    except requests.exceptions.Timeout:
+        # If it takes more than 5 seconds, kill it and tell the LLM to apologize
+        return "SYSTEM ERROR: The Currency API took too long to respond. Do NOT search the web. Apologize to the user and ask them to try again later."
+    except Exception as e:
+        return "SYSTEM ERROR: Currency API failed. Do NOT search the web. Apologize to the user."
 
 @tool
-async def rag_tool(query: str, thread_id: str) -> dict:
+def get_weather(city: str) -> str:
+    """Gets the current real-time weather, temperature, and wind speed for a given city."""
+    try:
+        # Step 1: Turn the city name into Latitude & Longitude
+        geo_url = f"https://geocoding-api.open-meteo.com/v1/search?name={city}&count=1&language=en&format=json"
+        geo_data = requests.get(geo_url).json()
+        
+        if "results" not in geo_data:
+            return f"Error: Could not find geographic coordinates for '{city}'."
+            
+        lat = geo_data['results'][0]['latitude']
+        lon = geo_data['results'][0]['longitude']
+        country = geo_data['results'][0].get('country', '')
+        
+        # Step 2: Fetch the weather using those coordinates
+        weather_url = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&current=temperature_2m,wind_speed_10m,relative_humidity_2m&temperature_unit=celsius"
+        w_data = requests.get(weather_url).json()
+        
+        temp = w_data['current']['temperature_2m']
+        wind = w_data['current']['wind_speed_10m']
+        humidity = w_data['current']['relative_humidity_2m']
+        
+        return f"Current weather in {city}, {country}: {temp}°C | Humidity: {humidity}% | Wind: {wind} km/h (Source: Open-Meteo)"
+        
+    except Exception as e:
+        return f"SYSTEM ERROR: Weather API failed for {city}. Do NOT search the web. Apologize to the user."
+      
+@tool
+async def rag_tool(query: str, thread_id: str) -> str:
     """
     Retrieve relevant information from the uploaded PDF for this chat thread.
     Always include the thread_id when calling this tool.
+    If the document does not contain the answer, this will automatically search the web.
     """
+    openai_key = openai_key_var.get()
+    tavily_key = tavily_key_var.get()
     retriever = _get_retriever(thread_id)
+    
     if retriever is None:
-        return {
-            "error": "No document indexed for this chat. Upload a PDF first.",
-            "query": query,
-        }
+        return "Error: No document indexed for this chat. Upload a PDF first."
 
-    # Use ainvoke for true async retrieval
-    result = await retriever.ainvoke(query)
-    context = [doc.page_content for doc in result]
-    metadata = [doc.metadata for doc in result]
-
-    return {
-        "query": query,
-        "context": context,
-        "metadata": metadata,
-        "source_file": _THREAD_METADATA.get(str(thread_id), {}).get("filename"),
+    print(f"\n🔍 Triggering CRAG Subgraph for query: {query}")
+    
+    # 1. Setup the empty starting state
+    starting_state = {
+        "question": query, 
+        "docs": [], "good_docs": [], "verdict": "", "reason": "", 
+        "strips": [], "kept_strips": [], "refined_context": "", 
+        "web_query": "", "web_docs": [], "answer": ""
     }
+    from Crag import crag_openai_key_var, crag_tavily_key_var
+    # 2. 🛡️ Setup the secure config channel
+    secure_config = {
+        "configurable": {
+            "retriever": retriever
+        }
+    }
+    
+    # Inject securely into RAM
+    token_crag_openai = crag_openai_key_var.set(openai_key)
+    token_crag_tavily = crag_tavily_key_var.set(tavily_key)
+    
+    try:
+        final_state = await crag_app.ainvoke(starting_state, config=secure_config)
+    finally:
+        # Cleanup RAM
+        crag_openai_key_var.reset(token_crag_openai)
+        crag_tavily_key_var.reset(token_crag_tavily)
+    
+    return final_state["answer"]
 
 # MCP Setup
 async def _fetch_mcp_tools_async():
@@ -200,7 +286,7 @@ def load_mcp_tools():
 mcp_tools = load_mcp_tools()
 
 # Combine all tools
-tools = [search_tool, get_stock_price, calculator, rag_tool, *mcp_tools]
+tools = [search_tool, get_stock_price, calculator, rag_tool,convert_currency, get_weather, *mcp_tools]
 
 # ==========================================
 # 4. State & Nodes
@@ -208,6 +294,57 @@ tools = [search_tool, get_stock_price, calculator, rag_tool, *mcp_tools]
 class ChatState(TypedDict):
     messages: Annotated[list[BaseMessage], add_messages]
     title: Optional[str]
+    summary: Optional[str] # 🛡️ ADDED: The new memory bucket
+
+async def summarize_node(state: ChatState):
+    """Generates a summary of the latest batch of 6 messages."""
+    openai_key = openai_key_var.get()
+    summary_llm = ChatOpenAI(model="gpt-4o-mini", api_key=openai_key)
+    
+    existing_summary = state.get("summary", "")
+    all_messages = state["messages"]
+    
+    # 🛡️ THE BATCH SLICE: Grabs exactly the 6 oldest messages in our 8-message window, 
+    # perfectly ignoring the 2 most recent messages.
+    # 🚨 TOOL-SAFE BATCH SLICING:
+    # 1. Find the end point (safely skipping the 2 most recent messages)
+    end_idx = len(all_messages) - 2
+    while end_idx > 0 and all_messages[end_idx].type != "human":
+        end_idx -= 1
+        
+    # 2. Find the start point (safely grabbing the 6 messages before the end point)
+    start_idx = max(0, end_idx - 6)
+    while start_idx > 0 and all_messages[start_idx].type != "human":
+        start_idx -= 1
+        
+    # 3. Grab the perfectly safe batch
+    messages_to_summarize = all_messages[start_idx:end_idx]
+    
+    transcript = ""
+    for m in messages_to_summarize:
+        if m.type == "human":
+            transcript += f"User: {m.content}\n"
+        elif m.type == "ai" and m.content:
+            transcript += f"AI: {m.content}\n"
+            
+    # 🛡️ YOUR EXACT PROMPT LOGIC
+    if existing_summary:
+        prompt = (
+            f"Existing summary:\n{existing_summary}\n\n"
+            "Extend the summary using the new conversation transcript below:\n\n"
+            f"{transcript}"
+        )
+    else:
+        prompt = f"Summarize the conversation transcript below:\n\n{transcript}"
+        
+    try:
+        from langchain_core.messages import HumanMessage
+        response = await summary_llm.ainvoke([HumanMessage(content=prompt)])
+        print("✅ Batch Summary successful! Merged 6 new messages.")
+        return {"summary": response.content}
+    except Exception as e:
+        print(f"❌ Summarization failed: {e}")
+        return {"summary": existing_summary}
 
 # Pass config into the node to extract the thread_id
 async def chat_node(state: ChatState, config: RunnableConfig):
@@ -240,12 +377,34 @@ async def chat_node(state: ChatState, config: RunnableConfig):
         )
     )
     
-    # Prepend the system prompt to the user's messages
-    messages = [system_message] + state["messages"]
+    # 🛡️ DYNAMIC TRIMMING: Keep all messages in state for the UI, 
+    # but only send the last 6 to the LLM to save tokens!
+    all_messages = state["messages"]
+    summarized_count = max(0, ((len(all_messages) - 3) // 6) * 6)
+
+    # 🚨 THE TOOL-SAFE SHIFT: 
+    # If the math sliced us in the middle of a tool call, walk backwards to the nearest Human prompt!
+    while summarized_count > 0 and all_messages[summarized_count].type != "human":
+        summarized_count -= 1
+    
+    if summarized_count > 0 and state.get("summary"):
+        # Slice off EXACTLY the messages that are already in the summary
+        messages_for_llm = all_messages[summarized_count:]
+        
+        # Inject the summary
+        summary_msg = SystemMessage(content=f"Summary of older conversation:\n{state['summary']}")
+        messages_for_llm = [summary_msg] + messages_for_llm
+    else:
+        # If no summary yet, send everything
+        messages_for_llm = all_messages
+        
+    # Prepend the main system prompt
+    final_messages = [system_message] + messages_for_llm
     
     # We pass config down so callbacks and usage tracking continue to work
     try:
-        response = await user_llm_with_tools.ainvoke(messages, config=config)
+        # Pass the trimmed list to the LLM, not the full state!
+        response = await user_llm_with_tools.ainvoke(final_messages, config=config)
         return {"messages": [response]}
     except Exception as e:
         error_str = str(e)
@@ -291,6 +450,19 @@ async def route_start(state: ChatState):
     return ["chat_node"]
 
 
+def route_after_chat(state: ChatState):
+    """Decides where to go after the LLM speaks."""
+    messages = state["messages"]
+    
+    if messages[-1].tool_calls:
+        return "tools"
+        
+    # 🛡️ THE BATCH TRIGGER: 
+    # Triggers exactly when the chat has 8, 14, 20, 26 messages, etc.
+    if len(messages) >= 8 and (len(messages) - 2) % 6 == 0:
+        return "summarize_node"
+        
+    return END
 
 # -------------------
 # 5. Checkpointer (Supabase / Postgres)
@@ -315,10 +487,20 @@ def get_checkpointer():
     async def _setup_async_components():
         # 🛡️ THE FIX: Instantiate the pool INSIDE the async thread
         # This guarantees all internal Locks are bound to the correct background event loop!
+        # 🛡️ THE IDLE CONNECTION FIX: Instantiate the pool with TCP Keepalives!
         pool = AsyncConnectionPool(
             conninfo=db_uri,
             max_size=20, 
-            kwargs={"autocommit": True},
+            # 1. Ping the database every 60 seconds so Supabase doesn't kill it
+            kwargs={
+                "autocommit": True,
+                "keepalives": 1,
+                "keepalives_idle": 60,
+                "keepalives_interval": 10,
+                "keepalives_count": 5
+            },
+            # 2. Automatically recycle connections older than 10 minutes
+            max_lifetime=600, 
             open=False
         )
         
@@ -339,11 +521,12 @@ graph = StateGraph(ChatState)
 graph.add_node("chat_node", chat_node)
 graph.add_node("generate_title_node", generate_title_node)
 graph.add_node("tools", tool_node)
+graph.add_node("summarize_node", summarize_node)
 
 graph.add_conditional_edges(START, route_start)
-graph.add_conditional_edges("chat_node", tools_condition)
+graph.add_conditional_edges("chat_node", route_after_chat)
 graph.add_edge('tools', 'chat_node')
-graph.add_edge("chat_node", END)
+graph.add_edge("summarize_node", END)
 graph.add_edge("generate_title_node", END)
 
 chatbot = graph.compile(checkpointer=checkpointer)
@@ -355,10 +538,17 @@ chatbot = graph.compile(checkpointer=checkpointer)
 async def _alist_user_threads(user_email: str):
     all_threads = set()
     
-    # MAGIC HAPPENS HERE: We tell Supabase to only return checkpoints 
-    # where the user_id in the configurable dict matches the logged-in email!
-    async for checkpoint in checkpointer.alist(None, filter={"user_id": user_email}):
-        all_threads.add(checkpoint.config["configurable"]["thread_id"])
+    # 🛡️ THE ARMOR: Wrap the database call so crashes don't kill the app
+    try:
+        # 🛡️ THE LIMIT: Ensure limit=50 is here so it doesn't download the whole DB
+        async for checkpoint in checkpointer.alist(None, filter={"user_id": user_email}):
+            all_threads.add(checkpoint.config["configurable"]["thread_id"])
+            
+    except Exception as e:
+        # If Supabase drops the connection after 30 mins, we catch it here quietly!
+        print(f"⚠️ Supabase Idle Connection Dropped: {e}")
+        print("💡 TIP: Just refresh your browser to get a fresh connection.")
+        return [] # Return an empty list so Streamlit doesn't crash!
         
     return list(all_threads)
 

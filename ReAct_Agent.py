@@ -5,10 +5,10 @@ from streamlit_oauth import OAuth2Component
 import streamlit as st
 import uuid
 import queue
-from back2 import (
+from back4 import (
     chatbot, retrieve_user_threads, submit_async_task,
     ingest_pdf, thread_document_metadata, remove_document,
-    openai_key_var, stock_key_var
+    openai_key_var, tavily_key_var # 🛡️ Updated!
 )
 
 from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
@@ -161,8 +161,35 @@ thread_docs = st.session_state['ingested_docs'].setdefault(thread_key, {})
 st.sidebar.title('LangGraph Chatbot')
 
 st.sidebar.header("🔑 API Keys")
-user_openai_key = st.sidebar.text_input("OpenAI API Key", type="password", placeholder="sk-...")
-user_stock_key = st.sidebar.text_input("Alpha Vantage Key", type="password", placeholder="Optional...")
+
+# ✅ THE FIX: Add the 'value=' parameter so they remember what you typed!
+user_openai_key = st.sidebar.text_input(
+    "OpenAI API Key", 
+    type="password", 
+    placeholder="sk-...",
+    value=st.session_state.get("openai_api_key", "") 
+)
+
+user_tavily_key = st.sidebar.text_input(
+    "Tavily API Key", 
+    type="password", 
+    placeholder="tvly-...",
+    value=st.session_state.get("tavily_api_key", "")
+)
+
+user_google_key = st.sidebar.text_input(
+    "Google/Gemini API Key (For Images)", 
+    type="password", 
+    placeholder="AIza...",
+    value=st.session_state.get("google_api_key", "")
+)
+
+if user_openai_key: 
+    st.session_state["openai_api_key"] = user_openai_key
+if user_tavily_key: 
+    st.session_state["tavily_api_key"] = user_tavily_key
+if user_google_key: 
+    st.session_state["google_api_key"] = user_google_key
 
 # Stop the app from running the chat if they haven't provided an OpenAI key
 if not user_openai_key:
@@ -346,7 +373,7 @@ if user_input:
             async def run_stream():
                 # 1. 🛡️ Set the variables and CAPTURE the tokens!
                 token_openai = openai_key_var.set(user_openai_key)
-                token_stock = stock_key_var.set(user_stock_key)
+                token_tavily = tavily_key_var.set(user_tavily_key)
                 try:
                     # 🛡️ INJECT KEYS INTO SECURE SERVER RAM
                     async for message_chunk, metadata in chatbot.astream(
@@ -361,7 +388,7 @@ if user_input:
                     # 2. 🧹 GUARANTEED CLEANUP: Reset RAM using the tokens
                     # This completely eliminates cross-user context bleeding.
                     openai_key_var.reset(token_openai)
-                    stock_key_var.reset(token_stock)
+                    tavily_key_var.reset(token_tavily)
                     event_queue.put(None)
 
             submit_async_task(run_stream())

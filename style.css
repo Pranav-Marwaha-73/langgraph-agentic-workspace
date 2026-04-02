@@ -3,8 +3,8 @@
 /* Custom Background Image with built-in overlay */
 .stApp {
     /* The linear-gradient acts as the overlay, sitting perfectly on top of the url() */
-    background: linear-gradient(rgba(241, 132, 132, 0.66), rgba(206, 252, 2, 0.1)), 
-                url("https://images.pexels.com/photos/12486830/pexels-photo-12486830.jpeg?_gl=1*bplksa*_ga*MTUwMzUzNjk4Ny4xNzczODY5NDE3*_ga_8JE65Q40S6*czE3NzM5Mjg2MzIkbzIkZzEkdDE3NzM5MzA0MDEkajU5JGwwJGgw");
+    background: linear-gradient(rgba(252, 190, 67, 0.549), rgba(243, 125, 237, 0.051)), 
+                url("https://images.pexels.com/photos/7135015/pexels-photo-7135015.jpeg?_gl=1*1dg918c*_ga*MTUwMzUzNjk4Ny4xNzczODY5NDE3*_ga_8JE65Q40S6*czE3NzUxMzc1NzMkbzUkZzEkdDE3NzUxMzc2MDckajI2JGwwJGgw");
     background-size: cover;
     background-position: center;
     background-attachment: fixed;
