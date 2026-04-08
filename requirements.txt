@@ -4,13 +4,17 @@ streamlit-oauth==0.1.14
 google-auth==2.49.1
 
 # --- LangChain & LangGraph Ecosystem ---
+# The exact versions from your local pip freeze to prevent import crashes
 langgraph==1.1.2
+langgraph-prebuilt==1.0.8
 langchain==1.2.12
+langchain-core==1.2.20
 langchain-openai==1.1.11
 langchain-community==0.4.1
 langchain-mcp-adapters==0.2.2
 langchain-text-splitters==1.1.1
 langchain-tavily==0.2.17
+langsmith==0.7.20
 
 # --- Cloud Database ---
 langgraph-checkpoint-postgres==3.0.4
