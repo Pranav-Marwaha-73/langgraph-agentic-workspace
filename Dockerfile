@@ -1,32 +1,32 @@
-# 1. The Base OS: We start with a lightweight Linux server running Python 3.11
+# 1. The Base OS
 FROM python:3.11-slim
 
-# 2. Set the working directory inside the container
+# 2. Set the working directory
 WORKDIR /app
 
-# 3. Install system-level tools (prevents errors when installing database drivers)
+# 3. Install system-level tools
 RUN apt-get update && apt-get install -y \
     build-essential \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-# 4. Copy ONLY the requirements first (Smart caching: makes future rebuilds 10x faster)
+# 4. Copy ONLY requirements first (Smart caching)
 COPY requirements.txt .
 
-# 5. Install all your Python packages
+# 5. Install Python packages
 RUN pip install --no-cache-dir -r requirements.txt
 
-# 6. Copy the rest of your app's code into the container
+# 6. Copy the rest of your app
 COPY . .
 
-# 7. Tell the container which port Streamlit uses
-EXPOSE 8501
-
-# 8. Set Streamlit's production environment variables (stops annoying popups and forces cloud mode)
+# 7. Render Environment Setup
+ENV PORT=10000
 ENV STREAMLIT_SERVER_HEADLESS=true
-ENV STREAMLIT_SERVER_PORT=8501
-ENV STREAMLIT_SERVER_ADDRESS=0.0.0.0
 ENV STREAMLIT_BROWSER_GATHER_USAGE_STATS=false
 
-# 9. The Ignition Switch: The exact command to boot your app
-CMD ["streamlit", "run", "ReAct_Agent.py"]
+# 8. Expose the fallback port (Render ignores this, but it's good practice)
+EXPOSE 10000
+
+# 9. The Ignition Switch
+# Using strict exec-shell form to guarantee $PORT evaluation, with CORS disabled for Cloudflare.
+CMD ["sh", "-c", "streamlit run ReAct_Agent.py --server.port=$PORT --server.address=0.0.0.0 --server.enableCORS=false"]
