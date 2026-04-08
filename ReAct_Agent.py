@@ -6,7 +6,7 @@ import streamlit as st
 import uuid
 import queue
 from back4 import (
-    chatbot, retrieve_user_threads, submit_async_task,
+    get_chatbot, retrieve_user_threads, submit_async_task,
     ingest_pdf, thread_document_metadata, remove_document,
     openai_key_var, tavily_key_var # 🛡️ Updated!
 )
@@ -87,6 +87,8 @@ if "user_email" not in st.session_state:
 # ✅ MAIN APP UNLOCKED
 # ==========================================
 # If the code reaches here, the user is successfully logged in!
+# ✅ FETCH THE CHATBOT HERE:
+chatbot = get_chatbot()
 # 🛡️ THE FIX: Sleek, dark frosted glass profile card
 st.sidebar.markdown(f"""
 <div style="background-color: rgba(0, 0, 0, 0.4); padding: 15px; border-radius: 10px; margin-bottom: 20px; border: 1px solid rgba(255, 255, 255, 0.1); backdrop-filter: blur(10px);">

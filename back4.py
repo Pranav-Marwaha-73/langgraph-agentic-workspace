@@ -514,7 +514,7 @@ def get_checkpointer():
     return run_async(_setup_async_components())
 
 # Streamlit fetches the safely cached singleton
-checkpointer = get_checkpointer()
+# checkpointer = get_checkpointer()
 
 
 graph = StateGraph(ChatState)
@@ -529,7 +529,9 @@ graph.add_edge('tools', 'chat_node')
 graph.add_edge("summarize_node", END)
 graph.add_edge("generate_title_node", END)
 
-chatbot = graph.compile(checkpointer=checkpointer)
+# ✅ REPLACE WITH THIS FUNCTION:
+def get_chatbot():
+    return graph.compile(checkpointer=get_checkpointer())
 
 # ==========================================
 # 6. Helpers
@@ -540,8 +542,9 @@ async def _alist_user_threads(user_email: str):
     
     # 🛡️ THE ARMOR: Wrap the database call so crashes don't kill the app
     try:
+        cp = get_checkpointer()
         # 🛡️ THE LIMIT: Ensure limit=50 is here so it doesn't download the whole DB
-        async for checkpoint in checkpointer.alist(None, filter={"user_id": user_email}):
+        async for checkpoint in cp.alist(None, filter={"user_id": user_email}):
             all_threads.add(checkpoint.config["configurable"]["thread_id"])
             
     except Exception as e:

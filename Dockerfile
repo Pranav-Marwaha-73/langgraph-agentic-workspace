@@ -29,4 +29,4 @@ EXPOSE 10000
 
 # 9. The Ignition Switch
 # Using strict exec-shell form to guarantee $PORT evaluation, with CORS disabled for Cloudflare.
-CMD ["streamlit", "run", "ReAct_Agent.py", "--server.port=10000", "--server.address=0.0.0.0"]
+CMD ["streamlit", "run", "ReAct_Agent.py", "--server.port=10000", "--server.address=0.0.0.0", "--server.enableCORS=false", "--server.enableXsrfProtection=false"]
