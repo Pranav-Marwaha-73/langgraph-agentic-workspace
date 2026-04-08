@@ -6,9 +6,9 @@ import streamlit as st
 import uuid
 import queue
 from back4 import (
-    get_chatbot, retrieve_user_threads, submit_async_task,
+    chatbot, retrieve_user_threads, submit_async_task,
     ingest_pdf, thread_document_metadata, remove_document,
-    openai_key_var, tavily_key_var # 🛡️ Updated!
+    openai_key_var, tavily_key_var, initialize_backend # 🛡️ Updated!
 )
 
 from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
@@ -74,6 +74,13 @@ if "user_email" not in st.session_state:
             # If the code reaches here, the token is mathematically proven to be real.
             st.session_state["user_email"] = payload["email"]
             st.session_state["user_name"] = payload.get("name", "User")
+            
+            # 🚀 Pre-warm backend during login (fixes 5-min cold start!)
+            with st.status("🔧 Preparing your workspace...", expanded=True) as status:
+                status.write("⏳ Connecting to database & loading tools...")
+                initialize_backend()
+                status.update(label="✅ Workspace ready!", state="complete")
+            
             st.rerun() # Refresh the page to unlock the app!
             
         except ValueError as e:
@@ -87,8 +94,6 @@ if "user_email" not in st.session_state:
 # ✅ MAIN APP UNLOCKED
 # ==========================================
 # If the code reaches here, the user is successfully logged in!
-# ✅ FETCH THE CHATBOT HERE:
-chatbot = get_chatbot()
 # 🛡️ THE FIX: Sleek, dark frosted glass profile card
 st.sidebar.markdown(f"""
 <div style="background-color: rgba(0, 0, 0, 0.4); padding: 15px; border-radius: 10px; margin-bottom: 20px; border: 1px solid rgba(255, 255, 255, 0.1); backdrop-filter: blur(10px);">

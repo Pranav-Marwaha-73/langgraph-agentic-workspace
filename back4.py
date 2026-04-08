@@ -283,10 +283,27 @@ def load_mcp_tools():
         print(f"\n❌ MCP CONNECTION ERROR: {e}\n")
         return []
 
-mcp_tools = load_mcp_tools()
+# ==========================================
+# LAZY INITIALIZATION (Fixes 5-min cold start on Render)
+# Nothing below runs at import time!
+# ==========================================
+_mcp_tools_cache = None
+_all_tools_cache = None
 
-# Combine all tools
-tools = [search_tool, get_stock_price, calculator, rag_tool,convert_currency, get_weather, *mcp_tools]
+def _get_mcp_tools():
+    """Fetch MCP tools lazily — only on first use, not at import."""
+    global _mcp_tools_cache
+    if _mcp_tools_cache is None:
+        _mcp_tools_cache = load_mcp_tools()
+    return _mcp_tools_cache
+
+def _get_all_tools():
+    """Combine all tools lazily."""
+    global _all_tools_cache
+    if _all_tools_cache is None:
+        mcp = _get_mcp_tools()
+        _all_tools_cache = [search_tool, get_stock_price, calculator, rag_tool, convert_currency, get_weather, *mcp]
+    return _all_tools_cache
 
 # ==========================================
 # 4. State & Nodes
@@ -362,7 +379,8 @@ async def chat_node(state: ChatState, config: RunnableConfig):
     
     # Initialize the LLM dynamically and bind the tools
     user_llm = ChatOpenAI(model="gpt-4o-mini", api_key=openai_key, model_kwargs={"stream_options": {"include_usage": True}})
-    user_llm_with_tools = user_llm.bind_tools(tools) if tools else user_llm
+    all_tools = _get_all_tools()
+    user_llm_with_tools = user_llm.bind_tools(all_tools) if all_tools else user_llm
     
     system_message = SystemMessage(
         content=(
@@ -421,7 +439,7 @@ async def chat_node(state: ChatState, config: RunnableConfig):
         return {"messages": [AIMessage(content=err_msg)]}
 
 
-tool_node = ToolNode(tools) if tools else None
+# tool_node is now created inside _build_chatbot() to avoid import-time blocking
 
 async def generate_title_node(state: ChatState):
     openai_key = openai_key_var.get()
@@ -490,7 +508,8 @@ def get_checkpointer():
         # 🛡️ THE IDLE CONNECTION FIX: Instantiate the pool with TCP Keepalives!
         pool = AsyncConnectionPool(
             conninfo=db_uri,
-            max_size=20, 
+            max_size=5,
+            min_size=1,  # Only open 1 connection initially, grow on demand
             # 1. Ping the database every 60 seconds so Supabase doesn't kill it
             kwargs={
                 "autocommit": True,
@@ -513,25 +532,50 @@ def get_checkpointer():
     # 3. Fire it into our background thread and wait for the initialized object
     return run_async(_setup_async_components())
 
-# Streamlit fetches the safely cached singleton
-# checkpointer = get_checkpointer()
+# ==========================================
+# LAZY GRAPH BUILDING (No blocking at import!)
+# ==========================================
+_chatbot_instance = None
+
+def _build_chatbot():
+    """Build the full LangGraph chatbot. Called once, result is cached in memory."""
+    global _chatbot_instance
+    if _chatbot_instance is not None:
+        return _chatbot_instance
+
+    print("🚀 Building chatbot graph (one-time setup)...")
+    checkpointer = get_checkpointer()
+    all_tools = _get_all_tools()
+    _tool_node = ToolNode(all_tools) if all_tools else None
+
+    graph = StateGraph(ChatState)
+    graph.add_node("chat_node", chat_node)
+    graph.add_node("generate_title_node", generate_title_node)
+    graph.add_node("tools", _tool_node)
+    graph.add_node("summarize_node", summarize_node)
+
+    graph.add_conditional_edges(START, route_start)
+    graph.add_conditional_edges("chat_node", route_after_chat)
+    graph.add_edge('tools', 'chat_node')
+    graph.add_edge("summarize_node", END)
+    graph.add_edge("generate_title_node", END)
+
+    _chatbot_instance = graph.compile(checkpointer=checkpointer)
+    print("✅ Chatbot graph ready!")
+    return _chatbot_instance
 
 
-graph = StateGraph(ChatState)
-graph.add_node("chat_node", chat_node)
-graph.add_node("generate_title_node", generate_title_node)
-graph.add_node("tools", tool_node)
-graph.add_node("summarize_node", summarize_node)
+class _ChatbotProxy:
+    """Lazy proxy — defers all heavy initialization until first actual use."""
+    def __getattr__(self, name):
+        return getattr(_build_chatbot(), name)
 
-graph.add_conditional_edges(START, route_start)
-graph.add_conditional_edges("chat_node", route_after_chat)
-graph.add_edge('tools', 'chat_node')
-graph.add_edge("summarize_node", END)
-graph.add_edge("generate_title_node", END)
+chatbot = _ChatbotProxy()
 
-# ✅ REPLACE WITH THIS FUNCTION:
-def get_chatbot():
-    return graph.compile(checkpointer=get_checkpointer())
+
+def initialize_backend():
+    """Pre-warm the entire backend (DB + MCP + Graph). Call during login."""
+    _build_chatbot()
 
 # ==========================================
 # 6. Helpers
