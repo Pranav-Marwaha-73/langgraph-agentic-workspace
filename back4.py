@@ -1,3 +1,9 @@
+# Add these to your existing imports at the top
+from langgraph.store.postgres.aio import AsyncPostgresStore
+from langgraph.store.base import BaseStore
+from pydantic import BaseModel, Field
+
+import uuid
 import os
 import tempfile
 from typing import TypedDict, Annotated, Optional, Dict, Any
@@ -31,6 +37,11 @@ import threading
 openai_key_var = contextvars.ContextVar('openai_key', default="")
 tavily_key_var = contextvars.ContextVar('tavily_key', default="")
 load_dotenv()
+
+import re as _re
+def _safe_namespace_id(email: str) -> str:
+    """Sanitize email for LangGraph namespace (no dots, @, or special chars)."""
+    return _re.sub(r"[^a-zA-Z0-9_-]", "_", email)
 
 # ==========================================
 # 1. Async Loop Setup & Core LLM/Embeddings
@@ -312,30 +323,42 @@ class ChatState(TypedDict):
     messages: Annotated[list[BaseMessage], add_messages]
     title: Optional[str]
     summary: Optional[str] # 🛡️ ADDED: The new memory bucket
+    last_summarized_at: Optional[int]  # 🛡️ Tracks msg count when summary last ran
 
-async def summarize_node(state: ChatState):
-    """Generates a summary of the latest batch of 6 messages."""
+# ==========================================
+# 🧠 LONG-TERM MEMORY SCHEMA + SHORT TERM MEMORY
+# ==========================================
+
+class SummaryAndMemoryDecision(BaseModel):
+    summary: str = Field(description="A concise summary of the conversation so far.")
+    new_user_facts: list[str] = Field(
+        default_factory=list, 
+        description="Extract permanent, long-term user facts (e.g., 'User is Pranav', 'Lives in Jalandhar', 'Prefers Python'). Ignore temporary conversational needs. Return an empty list if nothing new."
+    )
+
+async def summarize_node(state: ChatState, config: RunnableConfig, *, store: BaseStore):
+    """Generates a summary AND extracts long-term memory in parallel."""
     openai_key = openai_key_var.get()
-    summary_llm = ChatOpenAI(model="gpt-4o-mini", api_key=openai_key)
+    user_email = config.get("configurable", {}).get("user_id", "unknown_email")
     
+    # 🛡️ THE FIX: Force the LLM to output our JSON schema
+    summary_llm = ChatOpenAI(model="gpt-4o-mini", api_key=openai_key).with_structured_output(SummaryAndMemoryDecision)
+
     existing_summary = state.get("summary", "")
     all_messages = state["messages"]
+    last_summarized_at = state.get("last_summarized_at") or 0
     
-    # 🛡️ THE BATCH SLICE: Grabs exactly the 6 oldest messages in our 8-message window, 
-    # perfectly ignoring the 2 most recent messages.
-    # 🚨 TOOL-SAFE BATCH SLICING:
-    # 1. Find the end point (safely skipping the 2 most recent messages)
-    end_idx = len(all_messages) - 2
-    while end_idx > 0 and all_messages[end_idx].type != "human":
-        end_idx -= 1
-        
-    # 2. Find the start point (safely grabbing the 6 messages before the end point)
-    start_idx = max(0, end_idx - 6)
-    while start_idx > 0 and all_messages[start_idx].type != "human":
-        start_idx -= 1
-        
-    # 3. Grab the perfectly safe batch
-    messages_to_summarize = all_messages[start_idx:end_idx]
+    # 🛡️ SYNCED LOGIC: Summarize from where we left off up to (but NOT including) the last 2 human turns
+    human_indices = [i for i, m in enumerate(all_messages) if m.type == "human"]
+    
+    if len(human_indices) >= 2:
+        # Start right after the last summary ended
+        start_idx = last_summarized_at
+        # Stop BEFORE the 2nd-to-last human message (keep last 2 human turns fresh)
+        end_idx = human_indices[-2]
+        messages_to_summarize = all_messages[start_idx:end_idx] if end_idx > start_idx else []
+    else:
+        messages_to_summarize = []
     
     transcript = ""
     for m in messages_to_summarize:
@@ -344,27 +367,51 @@ async def summarize_node(state: ChatState):
         elif m.type == "ai" and m.content:
             transcript += f"AI: {m.content}\n"
             
-    # 🛡️ YOUR EXACT PROMPT LOGIC
+    # 🧠 DEDUP: Fetch existing memories so the LLM only extracts NEW facts
+    namespace = ("user", _safe_namespace_id(user_email), "memories")
+    existing_items = await store.asearch(namespace)
+    existing_facts = [it.value.get("data", "") for it in existing_items] if existing_items else []
+    existing_facts_text = "\n".join(f"- {f}" for f in existing_facts) if existing_facts else "None yet."
+
+    # 🛡️ PROMPT: Tell the LLM what's already known so it doesn't repeat
     if existing_summary:
         prompt = (
             f"Existing summary:\n{existing_summary}\n\n"
-            "Extend the summary using the new conversation transcript below:\n\n"
-            f"{transcript}"
+            f"ALREADY KNOWN user facts (DO NOT repeat these):\n{existing_facts_text}\n\n"
+            f"Extend the summary and extract ONLY NEW permanent facts from this transcript:\n\n{transcript}"
         )
     else:
-        prompt = f"Summarize the conversation transcript below:\n\n{transcript}"
-        
+        prompt = (
+            f"ALREADY KNOWN user facts (DO NOT repeat these):\n{existing_facts_text}\n\n"
+            f"Summarize the transcript and extract ONLY NEW permanent facts:\n\n{transcript}"
+        )
+
     try:
         from langchain_core.messages import HumanMessage
-        response = await summary_llm.ainvoke([HumanMessage(content=prompt)])
-        print("✅ Batch Summary successful! Merged 6 new messages.")
-        return {"summary": response.content}
+        # 🚀 Parallel Extraction triggers here!
+        response: SummaryAndMemoryDecision = await summary_llm.ainvoke([HumanMessage(content=prompt)])
+
+        # 💾 THE WRITE: Save ONLY genuinely new memories to Supabase
+        if response.new_user_facts:
+            # 🛡️ DEDUP FILTER: Skip facts that are already stored (case-insensitive)
+            existing_lower = {f.lower().strip() for f in existing_facts}
+            new_count = 0
+            for fact in response.new_user_facts:
+                if fact.strip() and fact.strip().lower() not in existing_lower:
+                    await store.aput(namespace, str(uuid.uuid4()), {"data": fact.strip()})
+                    new_count += 1
+            if new_count:
+                print(f"🧠 Saved {new_count} NEW memories for {user_email} (skipped {len(response.new_user_facts) - new_count} duplicates)")
+            
+        print("✅ Batch Summary & Memory Extraction successful!")
+        # 🛡️ SYNC ANCHOR: Record the exact cutoff so trimming knows where to cut
+        return {"summary": response.summary, "last_summarized_at": end_idx}
     except Exception as e:
         print(f"❌ Summarization failed: {e}")
         return {"summary": existing_summary}
 
 # Pass config into the node to extract the thread_id
-async def chat_node(state: ChatState, config: RunnableConfig):
+async def chat_node(state: ChatState, config: RunnableConfig, *, store: BaseStore):
     """LLM node that may answer or request a tool call."""
     
     # Extract thread_id from the runtime config
@@ -377,39 +424,56 @@ async def chat_node(state: ChatState, config: RunnableConfig):
         from langchain_core.messages import AIMessage
         return {"messages": [AIMessage(content="⚠️ Please enter your OpenAI API Key in the sidebar to chat.")]}
     
+    # 🔍 THE READ: Fetch memories from Supabase in <5ms!
+    namespace = ("user", _safe_namespace_id(user_email), "memories")
+    memory_items = await store.asearch(namespace)
+    user_memory_text = "\n".join(f"- {it.value.get('data', '')}" for it in memory_items) if memory_items else "No specific preferences recorded yet."
+
     # Initialize the LLM dynamically and bind the tools
     user_llm = ChatOpenAI(model="gpt-4o-mini", api_key=openai_key, model_kwargs={"stream_options": {"include_usage": True}})
     all_tools = _get_all_tools()
     user_llm_with_tools = user_llm.bind_tools(all_tools) if all_tools else user_llm
     
+    # 🧠 INJECT MEMORIES INTO THE BRAIN
     system_message = SystemMessage(
         content=(
-            "You are a highly capable AI assistant. "
-            f"The current thread_id is `{thread_id}` and the current user is `{user_email}`. "
+            "You are a helpful assistant with memory capabilities.\n"
+            "If user-specific memory is available, use it to personalize your responses "
+            "based on what you know about the user.\n"
+            "Your goal is to provide relevant, friendly, and tailored assistance that reflects "
+            "the user's preferences, context, and past interactions.\n\n"
+            "If the user's name or relevant personal context is available, always personalize your responses by:\n"
+            "  – Always address the user by name (e.g., 'Sure, Pranav...') when appropriate\n"
+            "  – Referencing known projects, tools, or preferences (e.g., 'your MCP server python based project')\n"
+            "  – Adjusting the tone to feel friendly, natural, and directly aimed at the user\n\n"
+            "Avoid generic phrasing when personalization is possible.\n"
+            "Use personalization especially in:\n"
+            "  – Greetings and transitions\n"
+            "  – Help or guidance tailored to tools and frameworks the user uses\n"
+            "  – Follow-up messages that continue from past context\n\n"
+            "Always ensure that personalization is based only on known user details and not assumed.\n"
+            "In the end, suggest 3 relevant further questions based on the current response and user profile.\n\n"
+            f"🧠 USER MEMORY:\n{user_memory_text}\n\n"
+            "--- TOOL INSTRUCTIONS ---\n"
+            f"The current thread_id is `{thread_id}` and the current user is `{user_email}`.\n"
             "If the user asks questions about an uploaded PDF or document, you MUST use the `rag_tool` "
-            "and pass this exact thread_id to it." 
+            "and pass this exact thread_id to it. "
             "CRITICAL PRIVACY RULE: If you use any Expense Tracking tools, you MUST always pass the user's email "
-            f"(`{user_email}`) to the tool so they only see their own private expenses."
-            "You also have access to web search, stock prices, "
-            "a calculator, and expense tracking tools."
+            f"(`{user_email}`) to the tool so they only see their own private expenses. "
+            "You also have access to web search, stock prices, a calculator, currency conversion, weather and expense tracking tools."
         )
     )
     
-    # 🛡️ DYNAMIC TRIMMING: Keep all messages in state for the UI, 
-    # but only send the last 6 to the LLM to save tokens!
+    # 🛡️ DYNAMIC TRIMMING (PERFECTLY SYNCED TO SUMMARY NODE)
+    # Trim at exactly `last_summarized_at` — the same cutoff the summary node used.
     all_messages = state["messages"]
-    summarized_count = max(0, ((len(all_messages) - 3) // 6) * 6)
-
-    # 🚨 THE TOOL-SAFE SHIFT: 
-    # If the math sliced us in the middle of a tool call, walk backwards to the nearest Human prompt!
-    while summarized_count > 0 and all_messages[summarized_count].type != "human":
-        summarized_count -= 1
+    last_summarized_at = state.get("last_summarized_at") or 0
     
-    if summarized_count > 0 and state.get("summary"):
-        # Slice off EXACTLY the messages that are already in the summary
-        messages_for_llm = all_messages[summarized_count:]
+    if state.get("summary") and last_summarized_at > 0:
+        # Cut everything before the summary cutoff — those are already in the summary
+        messages_for_llm = all_messages[last_summarized_at:]
         
-        # Inject the summary
+        # Inject the summary so the LLM knows the older context
         summary_msg = SystemMessage(content=f"Summary of older conversation:\n{state['summary']}")
         messages_for_llm = [summary_msg] + messages_for_llm
     else:
@@ -475,9 +539,16 @@ def route_after_chat(state: ChatState):
     if messages[-1].tool_calls:
         return "tools"
         
-    # 🛡️ THE BATCH TRIGGER: 
-    # Triggers exactly when the chat has 8, 14, 20, 26 messages, etc.
-    if len(messages) >= 8 and (len(messages) - 2) % 6 == 0:
+    # 🛡️ THE PERFECT SYNC: Count ONLY human messages!
+    # Humans never skip a turn, so this math is mathematically flawless.
+    human_count = sum(1 for m in messages if m.type == "human")
+    
+    # Trigger exactly when the human sends their 4th, 7th, 10th message.
+    should_summarize = human_count >= 4 and (human_count - 1) % 3 == 0
+    
+    print(f"📊 route: {len(messages)} total msgs | {human_count} human msgs | summarize={should_summarize}")
+    
+    if should_summarize:
         return "summarize_node"
         
     return END
@@ -525,9 +596,14 @@ def get_checkpointer():
         
         await pool.open(wait=True)
         # Because this is inside an 'async def', get_running_loop() will succeed!
+        # 1. Setup the Checkpointer (Short-term thread memory)
         cp = AsyncPostgresSaver(pool) 
         await cp.setup()
-        return cp
+        # 2. Setup the Store (Long-term cross-thread memory)
+        store = AsyncPostgresStore(pool)
+        await store.setup()
+        # Return BOTH to the graph!
+        return cp, store
 
     # 3. Fire it into our background thread and wait for the initialized object
     return run_async(_setup_async_components())
@@ -544,7 +620,8 @@ def _build_chatbot():
         return _chatbot_instance
 
     print("🚀 Building chatbot graph (one-time setup)...")
-    checkpointer = get_checkpointer()
+    # GRAB BOTH THE CHECKPOINTER AND THE STORE
+    cp, store = get_checkpointer()
     all_tools = _get_all_tools()
     _tool_node = ToolNode(all_tools) if all_tools else None
 
@@ -560,7 +637,7 @@ def _build_chatbot():
     graph.add_edge("summarize_node", END)
     graph.add_edge("generate_title_node", END)
 
-    _chatbot_instance = graph.compile(checkpointer=checkpointer)
+    _chatbot_instance = graph.compile(checkpointer=cp,store=store)
     print("✅ Chatbot graph ready!")
     return _chatbot_instance
 
@@ -586,7 +663,9 @@ async def _alist_user_threads(user_email: str):
     
     # 🛡️ THE ARMOR: Wrap the database call so crashes don't kill the app
     try:
-        cp = get_checkpointer()
+        # 🚨 THE FIX: Unpack the tuple! We only need 'cp' here, so we ignore the store with '_'
+        cp, _ = get_checkpointer()
+        
         # 🛡️ THE LIMIT: Ensure limit=50 is here so it doesn't download the whole DB
         async for checkpoint in cp.alist(None, filter={"user_id": user_email}):
             all_threads.add(checkpoint.config["configurable"]["thread_id"])

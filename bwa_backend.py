@@ -420,6 +420,8 @@ Rules:
 - Max 3 images total.
 - Each image must materially improve understanding (architectural diagram, flowchart, concept illustration).
 - NEVER request a table as an image. Tables must be handled via markdown text. 
+- NEVER request text-heavy infographics or charts that compare detailed features/weaknesses. Image models cannot render paragraphs of text.
+- Keep image prompts focused on abstract, visual representations of systems or workflows with minimal labels.
 - If no images needed, return an empty list [].
 - Avoid decorative images.
 """

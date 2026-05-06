@@ -6,7 +6,7 @@ import streamlit as st
 import uuid
 import queue
 from back4 import (
-    chatbot, retrieve_user_threads, submit_async_task,
+    chatbot, retrieve_user_threads, submit_async_task, run_async,
     ingest_pdf, thread_document_metadata, remove_document,
     openai_key_var, tavily_key_var, initialize_backend # 🛡️ Updated!
 )
@@ -131,13 +131,22 @@ def add_thread(thread_id):
 def load_conversation(thread_id):
     # Inject user_email here so LangGraph can find the secure checkpoint
     config = {'configurable': {'thread_id': thread_id, 'user_id': st.session_state["user_email"]}}
-    state = chatbot.get_state(config=config)
+    # 🚨 THE FIX: Use aget_state and route it safely through our background async loop
+    async def _fetch():
+        return await chatbot.aget_state(config=config)
+        
+    state = run_async(_fetch())
     return state.values.get('messages', [])
 
 def get_title_from_state(thread_id):
     # Inject user_email here as well
     config = {'configurable': {'thread_id': thread_id, 'user_id': st.session_state["user_email"]}}
-    state = chatbot.get_state(config=config)
+    
+    # 🚨 THE FIX: Use aget_state and route it safely through our background async loop
+    async def _fetch():
+        return await chatbot.aget_state(config=config)
+        
+    state = run_async(_fetch())
     return state.values.get('title', "New Chat")
 # ======================= Session Initialization ===================
 
