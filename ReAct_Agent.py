@@ -15,7 +15,7 @@ from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
 # Add remove_document to your import list!
 
 # 1. Configure the browser tab (MUST be the first Streamlit command!)
-st.set_page_config(page_title="LangGraph Agentic AI RAG Based System", page_icon="🤖")
+st.set_page_config(page_title="Self-Correcting Multi-Agent AI Research System", page_icon="🤖")
 
 # 2. Helper function to load the external CSS file
 def load_css(file_name):
@@ -326,14 +326,14 @@ for thread_id in reversed(st.session_state['chat_threads']):
 # 🛡️ THE FIX: The "Heavy Glass" Premium Container
 st.markdown("""
 <div style="background-color: rgba(255, 255, 255, 0.15); backdrop-filter: blur(12px); padding: 2.5rem; border-radius: 15px; border: 1px solid rgba(255, 255, 255, 0.3); box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1); margin-bottom: 2rem;">
-    <h1 style="color: #0f172a; margin-top: 0;">🤖 LangGraph Multi-Agent RAG System</h1>
+    <h1 style="color: #0f172a; margin-top: 0;">Self-Correcting Multi-Agent AI Research System</h1>
     <h3 style="color: #1e293b;">What can your Agentic AI do?</h3>
     <ol style="color: #1e293b; line-height: 1.8; font-size: 1.1rem; font-weight: 500;">
         <li><b style="color: #0f172a;">Web Search:</b> I can search the web for current information on various topics.</li>
         <li><b style="color: #0f172a;">Stock Prices:</b> I can fetch the latest stock price for any given company (e.g., AAPL for Apple, NVDA for Nvidia).</li>
-        <li><b style="color: #0f172a;">Calculator:</b> I can perform basic arithmetic operations such as addition, subtraction, multiplication, and division.</li>
-        <li><b style="color: #0f172a;">Expense Tracking:</b> I can help you track expenses by adding new entries, listing expenses within a date range, and summarizing expenses by category.</li>
-        <li><b style="color: #0f172a;">RAG:</b> If you upload a PDF or document, I can extract relevant information from it.</li>
+        <li><b style="color: #0f172a;">Calculator:</b> I can perform arithmetic operations such as addition, subtraction, multiplication, and division. Also convert currencies.</li>
+        <li><b style="color: #0f172a;">Expense Tracking MCP:</b> I can help you track expenses by adding new entries, listing expenses within a date range, and summarizing expenses by category.</li>
+        <li><b style="color: #0f172a;">CRAG:</b> If you upload a PDF or document, I can extract correct information from it.</li>
     </ol>
 </div>
 """, unsafe_allow_html=True)
